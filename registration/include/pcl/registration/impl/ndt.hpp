@@ -98,11 +98,6 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeTransform
     transformPointCloud(output, output, guess);
   }
 
-  // Initialize Point Gradient and Hessian
-  point_jacobian_.setZero();
-  point_jacobian_.block<3, 3>(0, 0).setIdentity();
-  point_hessian_.setZero();
-
   Eigen::Transform<Scalar, 3, Eigen::Affine, Eigen::ColMajor> eig_transformation;
   eig_transformation.matrix() = final_transformation_;
 
@@ -262,62 +257,64 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeAngleDeri
   // Precomputed angular gradient components. Letters correspond to Equation 6.19
   // [Magnusson 2009]
   angular_jacobian_.setZero();
-  angular_jacobian_.row(0).noalias() = Eigen::Vector4d(
-      (-sx * sz + cx * sy * cz), (-sx * cz - cx * sy * sz), (-cx * cy), 1.0); // a
   angular_jacobian_.row(1).noalias() = Eigen::Vector4d(
+      (-sx * sz + cx * sy * cz), (-sx * cz - cx * sy * sz), (-cx * cy), 1.0); // a
+  angular_jacobian_.row(2).noalias() = Eigen::Vector4d(
       (cx * sz + sx * sy * cz), (cx * cz - sx * sy * sz), (-sx * cy), 1.0); // b
-  angular_jacobian_.row(2).noalias() =
-      Eigen::Vector4d((-sy * cz), sy * sz, cy, 1.0); // c
+
   angular_jacobian_.row(3).noalias() =
-      Eigen::Vector4d(sx * cy * cz, (-sx * cy * sz), sx * sy, 1.0); // d
+      Eigen::Vector4d((-sy * cz), sy * sz, cy, 1.0); // c
   angular_jacobian_.row(4).noalias() =
-      Eigen::Vector4d((-cx * cy * cz), cx * cy * sz, (-cx * sy), 1.0); // e
+      Eigen::Vector4d(sx * cy * cz, (-sx * cy * sz), sx * sy, 1.0); // d
   angular_jacobian_.row(5).noalias() =
-      Eigen::Vector4d((-cy * sz), (-cy * cz), 0, 1.0); // f
+      Eigen::Vector4d((-cx * cy * cz), cx * cy * sz, (-cx * sy), 1.0); // e
+
   angular_jacobian_.row(6).noalias() =
-      Eigen::Vector4d((cx * cz - sx * sy * sz), (-cx * sz - sx * sy * cz), 0, 1.0); // g
+      Eigen::Vector4d((-cy * sz), (-cy * cz), 0, 1.0); // f
   angular_jacobian_.row(7).noalias() =
+      Eigen::Vector4d((cx * cz - sx * sy * sz), (-cx * sz - sx * sy * cz), 0, 1.0); // g
+  angular_jacobian_.row(8).noalias() =
       Eigen::Vector4d((sx * cz + cx * sy * sz), (cx * sy * cz - sx * sz), 0, 1.0); // h
 
   if (compute_hessian) {
     // Precomputed angular hessian components. Letters correspond to Equation 6.21 and
     // numbers correspond to row index [Magnusson 2009]
     angular_hessian_.setZero();
-    angular_hessian_.row(0).noalias() = Eigen::Vector4d(
-        (-cx * sz - sx * sy * cz), (-cx * cz + sx * sy * sz), sx * cy, 0.0f); // a2
     angular_hessian_.row(1).noalias() = Eigen::Vector4d(
+        (-cx * sz - sx * sy * cz), (-cx * cz + sx * sy * sz), sx * cy, 0.0f); // a2
+    angular_hessian_.row(2).noalias() = Eigen::Vector4d(
         (-sx * sz + cx * sy * cz), (-cx * sy * sz - sx * cz), (-cx * cy), 0.0f); // a3
 
-    angular_hessian_.row(2).noalias() =
+    angular_hessian_.row(4).noalias() =
         Eigen::Vector4d((cx * cy * cz), (-cx * cy * sz), (cx * sy), 0.0f); // b2
-    angular_hessian_.row(3).noalias() =
+    angular_hessian_.row(5).noalias() =
         Eigen::Vector4d((sx * cy * cz), (-sx * cy * sz), (sx * sy), 0.0f); // b3
 
     // The sign of 'sx * sz' in c2 is incorrect in the thesis, and is fixed here.
-    angular_hessian_.row(4).noalias() = Eigen::Vector4d(
+    angular_hessian_.row(7).noalias() = Eigen::Vector4d(
         (-sx * cz - cx * sy * sz), (sx * sz - cx * sy * cz), 0, 0.0f); // c2
-    angular_hessian_.row(5).noalias() = Eigen::Vector4d(
+    angular_hessian_.row(8).noalias() = Eigen::Vector4d(
         (cx * cz - sx * sy * sz), (-sx * sy * cz - cx * sz), 0, 0.0f); // c3
 
-    angular_hessian_.row(6).noalias() =
+    angular_hessian_.row(9).noalias() =
         Eigen::Vector4d((-cy * cz), (cy * sz), (-sy), 0.0f); // d1
-    angular_hessian_.row(7).noalias() =
+    angular_hessian_.row(10).noalias() =
         Eigen::Vector4d((-sx * sy * cz), (sx * sy * sz), (sx * cy), 0.0f); // d2
-    angular_hessian_.row(8).noalias() =
+    angular_hessian_.row(11).noalias() =
         Eigen::Vector4d((cx * sy * cz), (-cx * sy * sz), (-cx * cy), 0.0f); // d3
 
-    angular_hessian_.row(9).noalias() =
+    angular_hessian_.row(12).noalias() =
         Eigen::Vector4d((sy * sz), (sy * cz), 0, 0.0f); // e1
-    angular_hessian_.row(10).noalias() =
+    angular_hessian_.row(13).noalias() =
         Eigen::Vector4d((-sx * cy * sz), (-sx * cy * cz), 0, 0.0f); // e2
-    angular_hessian_.row(11).noalias() =
+    angular_hessian_.row(14).noalias() =
         Eigen::Vector4d((cx * cy * sz), (cx * cy * cz), 0, 0.0f); // e3
 
-    angular_hessian_.row(12).noalias() =
+    angular_hessian_.row(15).noalias() =
         Eigen::Vector4d((-cy * cz), (cy * sz), 0, 0.0f); // f1
-    angular_hessian_.row(13).noalias() = Eigen::Vector4d(
+    angular_hessian_.row(16).noalias() = Eigen::Vector4d(
         (-cx * sz - sx * sy * cz), (-cx * cz + sx * sy * sz), 0, 0.0f); // f2
-    angular_hessian_.row(14).noalias() = Eigen::Vector4d(
+    angular_hessian_.row(17).noalias() = Eigen::Vector4d(
         (-sx * sz + cx * sy * cz), (-cx * sy * sz - sx * cz), 0, 0.0f); // f3
   }
 }
@@ -330,41 +327,31 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computePointDeri
   // Calculate first derivative of Transformation Equation 6.17 w.r.t. transform vector.
   // Derivative w.r.t. ith element of transform vector corresponds to column i,
   // Equation 6.18 and 6.19 [Magnusson 2009]
-  Eigen::Matrix<double, 8, 1> point_angular_jacobian =
+  Eigen::Matrix<double, 9, 1> point_angular_jacobian =
       angular_jacobian_ * Eigen::Vector4d(x[0], x[1], x[2], 0.0);
-  point_jacobian_(1, 3) = point_angular_jacobian[0];
-  point_jacobian_(2, 3) = point_angular_jacobian[1];
-  point_jacobian_(0, 4) = point_angular_jacobian[2];
-  point_jacobian_(1, 4) = point_angular_jacobian[3];
-  point_jacobian_(2, 4) = point_angular_jacobian[4];
-  point_jacobian_(0, 5) = point_angular_jacobian[5];
-  point_jacobian_(1, 5) = point_angular_jacobian[6];
-  point_jacobian_(2, 5) = point_angular_jacobian[7];
+  point_jacobian_.block<3, 3>(0, 0).setIdentity();
+  point_jacobian_.col(3) = point_angular_jacobian.segment(0, 3);
+  point_jacobian_.col(4) = point_angular_jacobian.segment(3, 3);
+  point_jacobian_.col(5) = point_angular_jacobian.segment(6, 3);
 
   if (compute_hessian) {
-    Eigen::Matrix<double, 15, 1> point_angular_hessian =
-        angular_hessian_ * Eigen::Vector4d(x[0], x[1], x[2], 0.0);
-
     // Vectors from Equation 6.21 [Magnusson 2009]
-    const Eigen::Vector3d a(0, point_angular_hessian[0], point_angular_hessian[1]);
-    const Eigen::Vector3d b(0, point_angular_hessian[2], point_angular_hessian[3]);
-    const Eigen::Vector3d c(0, point_angular_hessian[4], point_angular_hessian[5]);
-    const Eigen::Vector3d d = point_angular_hessian.block<3, 1>(6, 0);
-    const Eigen::Vector3d e = point_angular_hessian.block<3, 1>(9, 0);
-    const Eigen::Vector3d f = point_angular_hessian.block<3, 1>(12, 0);
-
     // Calculate second derivative of Transformation Equation 6.17 w.r.t. transform
     // vector. Derivative w.r.t. ith and jth elements of transform vector corresponds to
     // the 3x1 block matrix starting at (3i,j), Equation 6.20 and 6.21 [Magnusson 2009]
-    point_hessian_.block<3, 1>(9, 3) = a;
-    point_hessian_.block<3, 1>(12, 3) = b;
-    point_hessian_.block<3, 1>(15, 3) = c;
-    point_hessian_.block<3, 1>(9, 4) = b;
-    point_hessian_.block<3, 1>(12, 4) = d;
-    point_hessian_.block<3, 1>(15, 4) = e;
-    point_hessian_.block<3, 1>(9, 5) = c;
-    point_hessian_.block<3, 1>(12, 5) = e;
-    point_hessian_.block<3, 1>(15, 5) = f;
+    Eigen::Matrix<double, 18, 1> point_angular_hessian =
+        angular_hessian_ * Eigen::Vector4d(x[0], x[1], x[2], 0.0);
+
+    point_hessian_.setZero();
+    point_hessian_.block<3, 1>(9, 3) = point_angular_hessian.segment(0, 3);
+    point_hessian_.block<3, 1>(9, 4) = point_angular_hessian.segment(3, 3);
+    point_hessian_.block<3, 1>(9, 5) = point_angular_hessian.segment(6, 3);
+    point_hessian_.block<3, 1>(12, 4) = point_angular_hessian.segment(9, 3);
+    point_hessian_.block<3, 1>(12, 5) = point_angular_hessian.segment(12, 3);
+    point_hessian_.block<3, 1>(15, 5) = point_angular_hessian.segment(15, 3);
+    point_hessian_.block<3, 1>(12, 3) = point_hessian_.block<3, 1>(9, 4);
+    point_hessian_.block<3, 1>(15, 3) = point_hessian_.block<3, 1>(9, 5);
+    point_hessian_.block<3, 1>(15, 4) = point_hessian_.block<3, 1>(12, 5);
   }
 }
 

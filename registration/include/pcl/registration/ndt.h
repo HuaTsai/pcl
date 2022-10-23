@@ -584,14 +584,14 @@ protected:
    * The precomputed angular derivatives for the jacobian of a transformation
    * vector, Equation 6.19 [Magnusson 2009].
    */
-  Eigen::Matrix<double, 8, 4> angular_jacobian_;
+  Eigen::Matrix<double, 9, 4> angular_jacobian_;
 
   /** \brief Precomputed Angular Hessian
    *
    * The precomputed angular derivatives for the hessian of a transformation
    * vector, Equation 6.19 [Magnusson 2009].
    */
-  Eigen::Matrix<double, 15, 4> angular_hessian_;
+  Eigen::Matrix<double, 18, 4> angular_hessian_;
 
   /** \brief The first order derivative of the transformation of a point
    * w.r.t. the transform vector, \f$ J_E \f$ in Equation 6.18 [Magnusson
