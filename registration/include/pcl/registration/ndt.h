@@ -78,6 +78,8 @@ protected:
   using PointIndicesPtr = PointIndices::Ptr;
   using PointIndicesConstPtr = PointIndices::ConstPtr;
 
+  using SourceGrid = VoxelGridCovariance<PointSource>;
+
   /** \brief Typename of searchable voxel grid containing mean and
    * covariance. */
   using TargetGrid = VoxelGridCovariance<PointTarget>;
@@ -87,6 +89,12 @@ protected:
   using TargetGridConstPtr = const TargetGrid*;
   /** \brief Typename of const pointer to searchable voxel grid leaf. */
   using TargetGridLeafConstPtr = typename TargetGrid::LeafConstPtr;
+
+  struct TransLeaf {
+    explicit TransLeaf(const Eigen::Vector3d &_mean, const Eigen::Matrix3d& _cov) : mean(_mean), cov(_cov) {}
+    Eigen::Vector3d mean;
+    Eigen::Matrix3d cov;
+  };
 
 public:
   using Ptr =
@@ -113,7 +121,19 @@ public:
   setInputTarget(const PointCloudTargetConstPtr& cloud) override
   {
     Registration<PointSource, PointTarget, Scalar>::setInputTarget(cloud);
-    init();
+    initTargetCells();
+  }
+
+  inline void
+  setUseD2DNDT(bool use_d2d)
+  {
+    use_d2d_ = use_d2d;
+  }
+
+  inline bool
+  getUseD2DNDT() const
+  {
+    return use_d2d_;
   }
 
   /** \brief Set/change the voxel grid resolution.
@@ -126,7 +146,7 @@ public:
     if (resolution_ != resolution) {
       resolution_ = resolution;
       if (input_) {
-        init();
+        initTargetCells();
       }
     }
   }
@@ -284,8 +304,17 @@ protected:
   void
   computeTransformation(PointCloudSource& output, const Matrix4& guess) override;
 
-  /** \brief Initiate covariance voxel structure. */
-  void inline init()
+  /** \brief Initiate source covariance voxel structure. */
+  void inline initSourceCells()
+  {
+    source_cells_.setLeafSize(resolution_, resolution_, resolution_);
+    source_cells_.setInputCloud(input_);
+    // Initiate voxel structure.
+    source_cells_.filter(true);
+  }
+
+  /** \brief Initiate target covariance voxel structure. */
+  void inline initTargetCells()
   {
     target_cells_.setLeafSize(resolution_, resolution_, resolution_);
     target_cells_.setInputCloud(target_);
@@ -297,7 +326,7 @@ protected:
    * transformation vector.
    * \note Equation 6.10, 6.12 and 6.13 [Magnusson 2009].
    * \param[out] score_gradient the gradient vector of the likelihood function
-   * w.r.t.  the transformation vector
+   * w.r.t. the transformation vector
    * \param[out] hessian the hessian matrix of the likelihood function
    * w.r.t. the transformation vector
    * \param[in] trans_cloud transformed point cloud
@@ -311,6 +340,25 @@ protected:
                      const PointCloudSource& trans_cloud,
                      const Eigen::Matrix<double, 6, 1>& transform,
                      bool compute_hessian = true);
+
+  /** \brief Compute derivatives of likelihood function w.r.t. the
+   * transformation vector.
+   * \note Equation (20) (24) [Stoyanov 2012].
+   * \param[out] score_gradient the gradient vector of the likelihood function
+   * w.r.t. the transformation vector
+   * \param[out] hessian the hessian matrix of the likelihood function
+   * w.r.t. the transformation vector
+   * \param[in] trans_leaves transformed point cloud cells
+   * \param[in] transform the current transform vector
+   * \param[in] compute_hessian flag to calculate hessian, unnecessary for step
+   * calculation.
+   */
+  double
+  computeDerivativesD2D(Eigen::Matrix<double, 6, 1>& score_gradient,
+                        Eigen::Matrix<double, 6, 6>& hessian,
+                        const std::vector<TransLeaf>& trans_leaves,
+                        const Eigen::Matrix<double, 6, 1>& transform,
+                        bool compute_hessian = true);
 
   /** \brief Compute individual point contributions to derivatives of
    * likelihood function w.r.t. the transformation vector.
@@ -332,6 +380,25 @@ protected:
                     const Eigen::Matrix3d& c_inv,
                     bool compute_hessian = true) const;
 
+  /** \brief Compute individual cell contributions to derivatives of
+   * likelihood function w.r.t. the transformation vector.
+   * \note Equation (20) (24) [Stoyanov 2012].
+   * \param[in,out] score_gradient the gradient vector of the likelihood
+   * function w.r.t. the transformation vector
+   * \param[in,out] hessian the hessian matrix of the likelihood function
+   * w.r.t. the transformation vector
+   * \param[in] uij transformed source cell mean minus target cell mean
+   * \param[in] B transformed covariance \f$ R\Sigma_i R^T \f$
+   * \param[in] compute_hessian flag to calculate hessian, unnecessary for step
+   * calculation.
+   */
+  double
+  updateDerivativesD2D(Eigen::Matrix<double, 6, 1>& score_gradient,
+                       Eigen::Matrix<double, 6, 6>& hessian,
+                       const Eigen::Vector3d& uij,
+                       const Eigen::Matrix3d& B,
+                       bool compute_hessian = true) const;
+
   /** \brief Precompute angular components of derivatives.
    * \note Equation 6.19 and 6.21 [Magnusson 2009].
    * \param[in] transform the current transform vector
@@ -350,6 +417,15 @@ protected:
    */
   void
   computePointDerivatives(const Eigen::Vector3d& x, bool compute_hessian = true);
+
+  /** \brief Comptue covariance derivatives \f$ R\Sigma R^T \f$.
+   * \note Equation (23) (26) [Stoyanov 2012].
+   * \param[in] cov covariance from input cloud NDT
+   * \param[in] compute_hessian flag to calculate hessian, unnecessary for step
+   * calculation.
+   */
+  void
+  computeCovarianceDerivatives(const Eigen::Matrix3d& cov, bool compute_hessian = true);
 
   /** \brief Compute hessian of likelihood function w.r.t. the transformation
    * vector.
@@ -380,6 +456,18 @@ protected:
     computeHessian(hessian, trans_cloud);
   }
 
+  /**
+   * \brief Compute hessian of likelihood function w.r.t. the transformation
+   * vector.
+   * \note Equation (24) [Stoyanov 2012].
+   * \param[out] hessian the hessian matrix of the likelihood function
+   * w.r.t. the transformation vector
+   * \param[in] trans_leaves transformed point cloud cells
+   */
+  void
+  computeHessianD2D(Eigen::Matrix<double, 6, 6>& hessian,
+                    const std::vector<TransLeaf>& trans_leaves);
+
   /** \brief Compute individual point contributions to hessian of likelihood
    * function w.r.t. the transformation vector.
    * \note Equation 6.13 [Magnusson 2009].
@@ -393,6 +481,19 @@ protected:
   updateHessian(Eigen::Matrix<double, 6, 6>& hessian,
                 const Eigen::Vector3d& x_trans,
                 const Eigen::Matrix3d& c_inv) const;
+
+  /** \brief Compute individual point contributions to hessian of likelihood
+   * function w.r.t. the transformation vector.
+   * \note Equation (24) [Stoyanov 2012].
+   * \param[in,out] hessian the hessian matrix of the likelihood function
+   * w.r.t. the transformation vector
+   * \param[in] uij transformed source cell mean minus target cell mean
+   * \param[in] B transformed covariance \f$ R\Sigma_i R^T \f$
+   */
+  void
+  updateHessianD2D(Eigen::Matrix<double, 6, 6>& hessian,
+                   const Eigen::Vector3d& uij,
+                   const Eigen::Matrix3d& B) const;
 
   /** \brief Compute line search step length and update transform and
    * likelihood derivatives using More-Thuente method.
@@ -551,9 +652,16 @@ protected:
     return g_a - mu * g_0;
   }
 
+  /** \brief The voxel grid generated from source cloud containing point means
+   * and covariances. */
+  SourceGrid source_cells_;
+
   /** \brief The voxel grid generated from target cloud containing point means
    * and covariances. */
   TargetGrid target_cells_;
+
+  /** \brief The option of using the D2D-NDT algorithm [Stoyanov 2012]. */
+  bool use_d2d_;
 
   /** \brief The side length of voxels. */
   float resolution_;
@@ -602,6 +710,18 @@ protected:
    * w.r.t. the transform vector, \f$ H_E \f$ in Equation 6.20 [Magnusson
    * 2009]. */
   Eigen::Matrix<double, 18, 6> point_hessian_;
+
+  /** \brief The first order derivative of the transformation of a covariance w.r.t. the transform vector, \f$ R\Sigma R^T \f$ in Equation (23) [Stoyanov 2012]. */
+  Eigen::Matrix<double, 3, 18> Zas_;
+
+  /** \brief The second order derivative of the transformation of a covariance w.r.t. the transform vector, \f$ R\Sigma R^T \f$ in Equation (26) [Stoyanov 2009]. */
+  Eigen::Matrix<double, 18, 18> Zabs_;
+
+  /** \brief The current rotation matrix used in D2D-NDT */
+  Eigen::Matrix3d R_;
+
+  /** \brief The current translation vector used in D2D-NDT */
+  Eigen::Vector3d t_;
 
 public:
   PCL_MAKE_ALIGNED_OPERATOR_NEW

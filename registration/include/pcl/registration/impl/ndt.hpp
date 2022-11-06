@@ -40,13 +40,15 @@
 
 #ifndef PCL_REGISTRATION_NDT_IMPL_H_
 #define PCL_REGISTRATION_NDT_IMPL_H_
-
+#include <iostream>
 namespace pcl {
 
 template <typename PointSource, typename PointTarget, typename Scalar>
 NormalDistributionsTransform<PointSource, PointTarget, Scalar>::
     NormalDistributionsTransform()
-: target_cells_()
+: source_cells_()
+, target_cells_()
+, use_d2d_(false)
 , resolution_(1.0f)
 , step_size_(0.1)
 , outlier_ratio_(0.55)
@@ -96,6 +98,7 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeTransform
     final_transformation_ = guess;
     // Apply guessed transformation prior to search for neighbours
     transformPointCloud(output, output, guess);
+    // TODO trans leave?
   }
 
   Eigen::Transform<Scalar, 3, Eigen::Affine, Eigen::ColMajor> eig_transformation;
@@ -103,16 +106,28 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeTransform
 
   // Convert initial guess matrix to 6 element transformation vector
   Eigen::Matrix<double, 6, 1> transform, score_gradient;
-  Vector3 init_translation = eig_transformation.translation();
-  Vector3 init_rotation = eig_transformation.rotation().eulerAngles(0, 1, 2);
-  transform << init_translation.template cast<double>(),
-      init_rotation.template cast<double>();
+  transform.head(3) = eig_transformation.translation().template cast<double>();
+  transform.tail(3) = eig_transformation.rotation().eulerAngles(0, 1, 2).template cast<double>();
 
   Eigen::Matrix<double, 6, 6> hessian;
 
   // Calculate derivates of initial transform vector, subsequent derivative calculations
   // are done in the step length determination.
-  double score = computeDerivatives(score_gradient, hessian, output, transform);
+  double score;
+  std::vector<TransLeaf> trans_leaves;
+  if (!use_d2d_) {
+    std::cout << "Init: " << output.size() << std::endl;
+    score = computeDerivatives(score_gradient, hessian, output, transform);
+  } else {
+    initSourceCells();
+    for (const auto& elem : source_cells_.getLeaves()) {
+      if (elem.second.nr_points < 6)
+        continue;
+      trans_leaves.push_back(TransLeaf(elem.second.mean_, elem.second.cov_));
+    }
+    std::cout << "tl size: " << trans_leaves.size() << std::endl;
+    score = computeDerivativesD2D(score_gradient, hessian, trans_leaves, transform);
+  }
 
   while (!converged_) {
     // Store previous transformation
@@ -190,6 +205,7 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeDerivativ
     const Eigen::Matrix<double, 6, 1>& transform,
     bool compute_hessian)
 {
+  std::cout << __FUNCTION__ << ": " << transform.transpose() << std::endl;
   score_gradient.setZero();
   hessian.setZero();
   double score = 0;
@@ -233,6 +249,44 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeDerivativ
 }
 
 template <typename PointSource, typename PointTarget, typename Scalar>
+double
+NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeDerivativesD2D(
+    Eigen::Matrix<double, 6, 1>& score_gradient,
+    Eigen::Matrix<double, 6, 6>& hessian,
+    const std::vector<TransLeaf>& trans_leaves,
+    const Eigen::Matrix<double, 6, 1>& transform,
+    bool compute_hessian)
+{
+  std::cout << __FUNCTION__ << ": " << transform.transpose() << std::endl;
+  score_gradient.setZero();
+  hessian.setZero();
+  double score = 0;
+  computeAngleDerivatives(transform);
+
+  for (const auto& leaf : trans_leaves) {
+    const auto& mean = leaf.mean;
+    const auto& cov = leaf.cov;
+    std::vector<TargetGridLeafConstPtr> neighborhood;
+    std::vector<float> distances;
+    PointSource meanpt;
+    meanpt.x = mean(0), meanpt.y = mean(1), meanpt.z = mean(2);
+    target_cells_.radiusSearch(meanpt, resolution_, neighborhood, distances);
+    // XXX: Nearest Neighbor / Set size 1
+    // target_cells_.nearestKSearch(meanpt, 1, neighborhood, distances);
+    for (const auto& cell : neighborhood) {
+      if (cell->nr_points < 6)
+        continue;
+      Eigen::Vector3d uij = mean - cell->getMean();
+      Eigen::Matrix3d B = (R_ * cov * R_.transpose() + cell->getCov()).inverse();
+      computePointDerivatives(uij, compute_hessian);
+      computeCovarianceDerivatives(cov, compute_hessian);
+      score += updateDerivativesD2D(score_gradient, hessian, uij, B, compute_hessian);
+    }
+  }
+  return score;
+}
+
+template <typename PointSource, typename PointTarget, typename Scalar>
 void
 NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeAngleDerivatives(
     const Eigen::Matrix<double, 6, 1>& transform, bool compute_hessian)
@@ -253,6 +307,13 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeAngleDeri
   calculate_cos_sin(transform(3), cx, sx);
   calculate_cos_sin(transform(4), cy, sy);
   calculate_cos_sin(transform(5), cz, sz);
+
+  if (use_d2d_) {
+    R_.row(0) << cy * cz, -sz * cy, sy;
+    R_.row(1) << sx * sy * cz + sz * cx, -sx * sy * sz + cx * cz, -sx * cy;
+    R_.row(2) << sx * sz - sy * cx * cz, sx * cz + sy * sz * cx, cx * cy;
+    t_ = transform.head(3);
+  }
 
   // Precomputed angular gradient components. Letters correspond to Equation 6.19
   // [Magnusson 2009]
@@ -356,6 +417,42 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computePointDeri
 }
 
 template <typename PointSource, typename PointTarget, typename Scalar>
+void
+NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeCovarianceDerivatives(
+    const Eigen::Matrix3d& cov, bool compute_hessian)
+{
+  Eigen::Ref<const Eigen::Matrix<double, 9, 3>> dR(angular_jacobian_.block<9, 3>(0, 0));
+  Eigen::Ref<const Eigen::Matrix<double, 18, 3>> ddR(angular_hessian_.block<18, 3>(0, 0));
+
+  Eigen::Matrix<double, 9, 3> za = dR * cov * R_.transpose();
+  Zas_.setZero();
+  Zas_.block<3, 3>(0, 9) = za.block<3, 3>(0, 0) + za.block<3, 3>(0, 0).transpose();
+  Zas_.block<3, 3>(0, 12) = za.block<3, 3>(3, 0) + za.block<3, 3>(3, 0).transpose();
+  Zas_.block<3, 3>(0, 15) = za.block<3, 3>(6, 0) + za.block<3, 3>(6, 0).transpose();
+
+  if (compute_hessian) {
+    Eigen::Matrix<double, 18, 3> z = ddR * cov * R_.transpose();
+    int i = 0;
+    for (int a = 0; a < 3; ++a) {
+      for (int b = a; b < 3; ++b) {
+        z.block<3, 3>(i * 3, 0) +=
+            Zas_.block<3, 3>(a * 3, 0) * cov * Zas_.block<3, 3>(b * 3, 0).transpose();
+        Eigen::Matrix3d tp = z.block<3, 3>(i * 3, 0).transpose();
+        z.block<3, 3>(i * 3, 0) += tp;
+        ++i;
+      }
+    }
+    Zabs_.setZero();
+    Zabs_.block<3, 3>(9, 9) = z.block<3, 3>(0, 0);
+    Zabs_.block<3, 3>(9, 12) = Zabs_.block<3, 3>(12, 9) = z.block<3, 3>(3, 0);
+    Zabs_.block<3, 3>(9, 15) = Zabs_.block<3, 3>(15, 9) = z.block<3, 3>(6, 0);
+    Zabs_.block<3, 3>(12, 12) = z.block<3, 3>(9, 0);
+    Zabs_.block<3, 3>(12, 15) = Zabs_.block<3, 3>(15, 12) = z.block<3, 3>(12, 0);
+    Zabs_.block<3, 3>(15, 15) = z.block<3, 3>(15, 0);
+  }
+}
+
+template <typename PointSource, typename PointTarget, typename Scalar>
 double
 NormalDistributionsTransform<PointSource, PointTarget, Scalar>::updateDerivatives(
     Eigen::Matrix<double, 6, 1>& score_gradient,
@@ -404,6 +501,45 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::updateDerivative
 }
 
 template <typename PointSource, typename PointTarget, typename Scalar>
+double
+NormalDistributionsTransform<PointSource, PointTarget, Scalar>::updateDerivativesD2D(
+    Eigen::Matrix<double, 6, 1>& score_gradient,
+    Eigen::Matrix<double, 6, 6>& hessian,
+    const Eigen::Vector3d& uij,
+    const Eigen::Matrix3d& B,
+    bool compute_hessian) const
+{
+  Eigen::Ref<const Eigen::Matrix<double, 3, 6>> jas(point_jacobian_);
+  Eigen::Ref<const Eigen::Matrix<double, 18, 6>> Habs(point_hessian_);
+
+  Eigen::Transpose<const Eigen::Vector3d> uijT(uij);
+  double score = -gauss_d1_ * std::exp(-0.5 * gauss_d2_ * uijT * B * uij);
+  for (int a = 0; a < 6; ++a) {
+    Eigen::Ref<const Eigen::Vector3d> ja(jas.block<3, 1>(0, a));
+    Eigen::Ref<const Eigen::Matrix3d> Za(Zas_.block<3, 3>(0, 3 * a));
+    double qa = (2 * uijT * B * ja - uijT * B * Za * B * uij)(0);
+    score_gradient(a) += -0.5 * gauss_d2_ * score * qa;
+
+    if (compute_hessian) {
+      for (int b = 0; b < 6; ++b) {
+        Eigen::Ref<const Eigen::Vector3d> jb(jas.block<3, 1>(0, b));
+        Eigen::Transpose<const Eigen::Vector3d> jbT(jas.block<3, 1>(0, b));
+        Eigen::Ref<const Eigen::Matrix3d> Zb(Zas_.block<3, 3>(0, 3 * b));
+        Eigen::Ref<const Eigen::Vector3d> Hab(Habs.block<3, 1>(3 * a, b));
+        Eigen::Ref<const Eigen::Matrix3d> Zab(Zabs_.block<3, 3>(3 * a, 3 * b));
+        double qb = (2 * uijT * B * jb - uijT * B * Zb * B * uij)(0);
+        hessian(a, b) += -gauss_d2_ * score *
+                         ((jbT * B * ja - uijT * B * Zb * B * ja + uijT * B * Hab -
+                           uijT * B * Za * B * jb + uijT * B * Za * B * Zb * B * uij -
+                           0.5 * uijT * B * Zab * B * uij)(0) -
+                          0.25 * gauss_d2_ * qa * qb);
+      }
+    }
+  }
+  return score;
+}
+
+template <typename PointSource, typename PointTarget, typename Scalar>
 void
 NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeHessian(
     Eigen::Matrix<double, 6, 6>& hessian, const PointCloudSource& trans_cloud)
@@ -447,6 +583,35 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeHessian(
 
 template <typename PointSource, typename PointTarget, typename Scalar>
 void
+NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeHessianD2D(
+    Eigen::Matrix<double, 6, 6>& hessian, const std::vector<TransLeaf>& trans_leaves)
+{
+  hessian.setZero();
+
+  for (const auto& leaf : trans_leaves) {
+    const auto& mean = leaf.mean;
+    const auto& cov = leaf.cov;
+    std::vector<TargetGridLeafConstPtr> neighborhood;
+    std::vector<float> distances;
+    PointSource meanpt;
+    meanpt.x = mean(0), meanpt.y = mean(1), meanpt.z = mean(2);
+    target_cells_.radiusSearch(meanpt, resolution_, neighborhood, distances);
+    // XXX: Nearest Neighbor / Set size 1
+    // target_cells_.nearestKSearch(meanpt, 1, neighborhood, distances);
+    for (const auto& cell : neighborhood) {
+      if (cell->nr_points < 6)
+        continue;
+      Eigen::Vector3d uij = mean - cell->getMean();
+      Eigen::Matrix3d B = (R_ * cov * R_.transpose() + cell->getCov()).inverse();
+      computePointDerivatives(uij);
+      computeCovarianceDerivatives(cov);
+      updateHessianD2D(hessian, uij, B);
+    }
+  }
+}
+
+template <typename PointSource, typename PointTarget, typename Scalar>
+void
 NormalDistributionsTransform<PointSource, PointTarget, Scalar>::updateHessian(
     Eigen::Matrix<double, 6, 6>& hessian,
     const Eigen::Vector3d& x_trans,
@@ -476,6 +641,38 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::updateHessian(
                            x_trans.dot(c_inv * point_jacobian_.col(j)) +
                        x_trans.dot(c_inv * point_hessian_.block<3, 1>(3 * i, j)) +
                        point_jacobian_.col(j).dot(cov_dxd_pi));
+    }
+  }
+}
+
+template <typename PointSource, typename PointTarget, typename Scalar>
+void
+NormalDistributionsTransform<PointSource, PointTarget, Scalar>::updateHessianD2D(
+    Eigen::Matrix<double, 6, 6>& hessian,
+    const Eigen::Vector3d& uij,
+    const Eigen::Matrix3d& B) const
+{
+  Eigen::Ref<const Eigen::Matrix<double, 3, 6>> jas(point_jacobian_);
+  Eigen::Ref<const Eigen::Matrix<double, 18, 6>> Habs(point_hessian_);
+  Eigen::Transpose<const Eigen::Vector3d> uijT(uij);
+  double d1d2exp = gauss_d1_ * gauss_d2_ * std::exp(-0.5 * gauss_d2_ * uijT * B * uij);
+  for (int a = 0; a < 6; ++a) {
+    Eigen::Ref<const Eigen::Vector3d> ja(jas.block<3, 1>(0, a));
+    Eigen::Ref<const Eigen::Matrix3d> Za(Zas_.block<3, 3>(0, 3 * a));
+    double qa = (2 * uijT * B * ja - uijT * B * Za * B * uij)(0);
+
+    for (int b = 0; b < 6; ++b) {
+      Eigen::Ref<const Eigen::Vector3d> jb(jas.block<3, 1>(0, b));
+      Eigen::Transpose<const Eigen::Vector3d> jbT(jas.block<3, 1>(0, b));
+      Eigen::Ref<const Eigen::Matrix3d> Zb(Zas_.block<3, 3>(0, 3 * b));
+      Eigen::Ref<const Eigen::Vector3d> Hab(Habs.block<3, 1>(3 * a, b));
+      Eigen::Ref<const Eigen::Matrix3d> Zab(Zabs_.block<3, 3>(3 * a, 3 * b));
+      double qb = (2 * uijT * B * jb - uijT * B * Zb * B * uij)(0);
+      hessian(a, b) +=
+          d1d2exp * ((jbT * B * ja - uijT * B * Zb * B * ja + uijT * B * Hab -
+                      uijT * B * Za * B * jb + uijT * B * Za * B * Zb * B * uij -
+                      0.5 * uijT * B * Zab * B * uij)(0) -
+                     0.25 * gauss_d2_ * qa * qb);
     }
   }
 }
@@ -707,7 +904,24 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeStepLengt
   // testing showed that most step calculations use the initial step suggestion and
   // recalculation the reusable portions of the hessian would intail more computation
   // time.
-  score = computeDerivatives(score_gradient, hessian, trans_cloud, x_t, true);
+  std::cout << "MT(0), ";
+  std::vector<TransLeaf> trans_leaves;
+  if (!use_d2d_) {
+    score = computeDerivatives(score_gradient, hessian, trans_cloud, x_t, true);
+  } else {
+    // D2D-NDT transformed source leaves
+    Eigen::Affine3d tf(final_transformation_.template cast<double>());
+    for (const auto& elem : source_cells_.getLeaves()) {
+      if (elem.second.nr_points < 6)
+        continue;
+      Eigen::Vector3d trans_mean;
+      transformPoint(elem.second.mean_, trans_mean, tf);
+      Eigen::Matrix3d trans_cov =
+          tf.rotation() * elem.second.cov_ * tf.rotation().transpose();
+      trans_leaves.push_back(TransLeaf(trans_mean, trans_cov));
+    }
+    score = computeDerivativesD2D(score_gradient, hessian, trans_leaves, x_t, true);
+  }
 
   // Calculate phi(alpha_t)
   double phi_t = -score;
@@ -746,7 +960,23 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeStepLengt
     transformPointCloud(*input_, trans_cloud, final_transformation_);
 
     // Updates score, gradient. Values stored to prevent wasted computation.
-    score = computeDerivatives(score_gradient, hessian, trans_cloud, x_t, false);
+    std::cout << "MT(n), ";
+    if (!use_d2d_) {
+      score = computeDerivatives(score_gradient, hessian, trans_cloud, x_t, false);
+    } else {
+      trans_leaves.clear();
+      Eigen::Affine3d tf(final_transformation_.template cast<double>());
+      for (const auto& elem : source_cells_.getLeaves()) {
+        if (elem.second.nr_points < 6)
+          continue;
+        Eigen::Vector3d trans_mean;
+        transformPoint(elem.second.mean_, trans_mean, tf);
+        Eigen::Matrix3d trans_cov =
+            tf.rotation() * elem.second.cov_ * tf.rotation().transpose();
+        trans_leaves.push_back(TransLeaf(trans_mean, trans_cov));
+      }
+      score = computeDerivativesD2D(score_gradient, hessian, trans_leaves, x_t, false);
+    }
 
     // Calculate phi(alpha_t+)
     phi_t = -score;
@@ -790,7 +1020,11 @@ NormalDistributionsTransform<PointSource, PointTarget, Scalar>::computeStepLengt
   // Hessian is unnecessary for step length determination but gradients are required
   // so derivative and transform data is stored for the next iteration.
   if (step_iterations) {
-    computeHessian(hessian, trans_cloud);
+    if (!use_d2d_) {
+      computeHessian(hessian, trans_cloud);
+    } else {
+      computeHessianD2D(hessian, trans_leaves);
+    }
   }
 
   return a_t;
